@@ -1,5 +1,6 @@
 import tensorflow as tf
 import numpy as np
+from tensorflow.examples.tutorials.mnist import input_data
 
 def inference(images):
     images = tf.cast(images, tf.float32)
@@ -35,21 +36,16 @@ def inference(images):
         print(capsule_blocks)
 
     with tf.variable_scope("capsule_weights1") as scope:
-        weight_matrix = tf.random_normal(shape=[32,10,16,8], name=scope.name)
+        capsule_weights1 = tf.random_normal(shape=[32,10,16,8], name=scope.name)
 
     with tf.variable_scope("weight_dot") as scope:
-        elems = (capsule_blocks, weight_matrix)
+        elems = (capsule_blocks, capsule_weights1)
         prediction_vec1_transposed = caps_dot(elems) # shape = [32,?,6,6,10,16]
         prediction_vec1 = tf.transpose(prediction_vec1_transposed, [1,4,0,2,3,5]) # shape = [?,10,32,6,6,16]
-        # temp=[]
-        # for i in range(32):
-        #     temp.append(tf.tensordot(capsule_blocks[:,i,:,:,:],weight_matrix[i,:,:,:], [[3], [0]]))
-        # prediction_vec1 = tf.stack(temp, 1)
         print("preds:", prediction_vec1)
-        # prediction_vec1 = capsule_weight_prod(split_caps_stack, weight_matrix, 32) # shape = [BATCH_SIZE,32,6,6,16,10]
 
     with tf.variable_scope("routing1") as scope:
-        vs1 = routing(prediction_vec1, 3, 2)
+        vs1 = routing(prediction_vec1, 50, 2)
 
     with tf.variable_scope("fc1") as scope:
         # vs1 = tf.expand_dims(vs, 0) # Will change later once algorithm optimized to batch size
@@ -80,23 +76,36 @@ def routing(prediction_vectors, r0, l0):
     # shape prediction_vectors = [?,10,32,6,6,16]
     with tf.variable_scope("capsule_layer_%d" % l0) as scope:
         batch_size = tf.shape(prediction_vectors)[0]
-        b011 = tf.placeholder(tf.float32, shape=[None,10,32,6,6,1])
-        b0 = tf.zeros_like(b011) #tf.zeros(shape=[batch_size,10,32,6,6,1])
-        # b0 = tf.Variable(b01, name='b0')
+        b01 = tf.stack([batch_size, 10,32,6,6,1])
+        b0 = tf.fill(b01, 0.0)
         print(b0)
-        c0 = tf.nn.softmax(b0)
+        c0 = tf.nn.softmax(b0, dim=1)
         i0 = tf.constant(0)
-        v01 = tf.placeholder(tf.float32, shape=[None,10,16])
-        v0 = tf.zeros_like(v01) #tf.Variable(tf.zeros(shape=[batch_size, 10, 16]), name='v0')
+        v01 = tf.stack([batch_size, 10, 16])
+        v0 = tf.fill(v01, 0.0)
         print(v0)
 
-        _, _, vs, _, _, _ = tf.while_loop(
-            cond = lambda i, pred_vecs, v, b, c, r: condition(i, pred_vecs, v, b, c, r),
-            body = lambda i, pred_vecs, v, b, c, r: body(i, pred_vecs, v, b, c, r),
-            loop_vars = [i0, prediction_vectors, v0, b0, c0, r0]
-        )
+        for i in range(r0):
+            c = tf.nn.softmax(b0, dim=1)
+            s_tensor1 = tf.multiply(c, prediction_vectors) # shape = [BATCH_SIZE,10,32,6,6,16]
+            print(s_tensor1)
+            print(prediction_vectors)
+            s1 = tf.reduce_sum(s_tensor1, axis=[2,3,4]) # shape = [BATCH_SIZE,10,16]
+            print(s1)
 
-    return vs
+            v = squash(s1) # shape = [BATCH_SIZE,10,16]
+
+            elems = (prediction_vectors, v)
+            agreement1 = nested_caps_dot(elems,1) # shape = [BATCH_SIZE,10,32,6,6]
+            agreement1_expanded = tf.expand_dims(agreement1, 4)
+            tf.add(b0, agreement1_expanded)
+        # _, _, vs, _, _, _ = tf.while_loop(
+        #     cond = lambda i, pred_vecs, v, b, c, r: condition(i, pred_vecs, v, b, c, r),
+        #     body = lambda i, pred_vecs, v, b, c, r: body(i, pred_vecs, v, b, c, r),
+        #     loop_vars = [i0, prediction_vectors, v0, b0, c0, r0]
+        # )
+
+    return v
 
 def condition(i, prediction_vectors, v, b, c, r):
     return tf.less(i,r)
@@ -105,15 +114,16 @@ def body(i, prediction_vectors, v, b, c, r):
     # shape prediction_vectors = [BATCH_SIZE,10,32,6,6,16]
     # shape v = [BATCH_SIZE,10,16]
     # shape b = [BATCH_SIZE,10,32,6,6,1]
+    # shape c = [BATCH_SIZE,10,32,6,6,1]
     with tf.variable_scope("coupling"):
-        c = tf.nn.softmax(b)
+        c = tf.nn.softmax(b, dim=1)
         print(c)
 
     with tf.variable_scope("total_input") as scope:
         s_tensor1 = tf.multiply(c, prediction_vectors) # shape = [BATCH_SIZE,10,32,6,6,16]
         print(s_tensor1)
         print(prediction_vectors)
-        s1 = tf.reduce_sum(prediction_vectors, axis=[2,3,4]) # shape = [BATCH_SIZE,10,16]
+        s1 = tf.reduce_sum(s_tensor1, axis=[2,3,4]) # shape = [BATCH_SIZE,10,16]
         print(s1)
 
     with tf.variable_scope("vector_output") as scope:
@@ -127,44 +137,19 @@ def body(i, prediction_vectors, v, b, c, r):
 
     return tf.add(i,1), prediction_vectors, v, b, c, r
 
-def calculate_agreement(prediction_vectors, v):
-    # shape prediction_vectors = [BATCH_SIZE,32,6,6,16,10]
-    # shape v = [BATCH_SIZE,16,10]
-    # shape out = [BATCH_SIZE,32,6,6,10]
-    batch_size = tf.shape(prediction_vectors)[0]
-    agreement_for_full_batch_list = []
-    for batch in range(10):
-        agreement_for_single_batch_list = []
-        for j in range(10):
-            agreement_for_single_batch_list.append(tf.tensordot(prediction_vectors[batch,:,:,:,:,j], v[batch,:,j], [[3], [0]]))
-        # print(prediction_vectors)
-        # print(v)
-        # print(agreement_for_single_batch_list)
-        agreement_single_batch_stack = tf.stack(agreement_for_single_batch_list) # shape = [10, BATCH_SIZE, 32, 6, 6]
-        agreement_for_full_batch_list.append(agreement_single_batch_stack)
-        print(agreement_for_full_batch_list)
-    agreement1_stacked = tf.stack(agreement_for_full_batch_list)
-    print(agreement1_stacked)
-    agreement1_transposed = tf.transpose(agreement1_stacked, perm=[0, 2, 3, 4, 1]) # shape = [BATCH_SIZE, 32, 6, 6, 10]
-    print(agreement1_transposed)
-    agreement1_expanded = tf.expand_dims(agreement1_transposed, 4) # shape = [BATCH_SIZE, 32, 6, 6, 1, 10]
-
-    return agreement1_expanded
-
 def squash(s):
-    s_norm = tf.norm(s, axis=1)
-    print(s_norm)
-    print("inside squash")
-    print(tf.ones([tf.shape(s)[0]]))
-    v = tf.square(s_norm)/(tf.ones([tf.shape(s)[0]]) + tf.square(s_norm)) * (s / s_norm)
-    print(v) # shape = [BATCH_SIZE, 16, 10]
+    # shape s = [BATCH_SIZE, 10, 16]
+    # shape s_norm = [BATCH_SIZE, 10]
+    with tf.variable_scope("squash") as scope:
+        s_last_dim_idx = s.get_shape().ndims - 1
+        s_norm1 = tf.norm(s, axis=s_last_dim_idx)
+        s_norm = tf.expand_dims(s_norm1, s_last_dim_idx)
+        print("inside squash")
+        print(s_norm)
+        print(tf.ones(tf.shape(s)))
+        v = tf.square(s_norm)/(tf.ones(tf.shape(s_norm)) + tf.square(s_norm)) * (s / s_norm)
+        print(v) # shape = [BATCH_SIZE, 10, 16]
     return v
-
-def capsule_weight_prod(t1, t2, n_blocks):
-    prediction_vector_list=[]
-    for i in range(n_blocks):
-        prediction_vector_list.append(tf.tensordot(t1[i,:,:,:],t2[i,:,:,:], [[2], [0]]))
-    return tf.stack(prediction_vector_list)
 
 def tensor_dot(tup):
     # shape tup = ([?,6,6,8], [16,10,8])
@@ -188,45 +173,87 @@ def nested_caps_dot(tup, i):
         return tf.map_fn(lambda x: nested_caps_dot(x, i-1), tup, dtype=tf.float32)
 
 def margin_loss(vs, T):
-    # shape vs = [?, 16, 10]
+    # Works as intended
+    # shape vs = [?, 10, 16]
     # shape T = [?, 10]
-    # shape v_k = [16, 1]
+    # shape v_k = [?, 1, 16]
+    # shape L = [?,10]
     L = []
     m_plus = 0.9
     m_minus = 0.1
     lambda_val = 0.5
 
-    # for k in range(10):
-    #     Tk = T[0,k]
-    #     first_max = tf.square(tf.maximum(0, m_plus - tf.norm(vs[:,k])))
-    #     second_max = tf.square(tf.maximum(0, tf.norm(vs[:,k]) - m_minus))
-    #     Lk = Tk*first_max + lambda_val*(1-Tk)*second_max
-    #     L.append(Lk)
+    with tf.variable_scope('margin_loss') as scope:
+        print('margin loss')
+        first_max = tf.square(tf.maximum(0., m_plus - tf.norm(vs, axis=2))) # shape = [?,10]
+        print(first_max)
+        second_max = tf.square(tf.maximum(0., tf.norm(vs, axis=2) - m_minus)) # shape = [?,10]
+        print(second_max)
+        L = T*first_max + lambda_val*(1 - T)*second_max # shape = [?,10]
+        # L = (1-T)*second_max
+        print(L)
 
-    first_max = tf.square(tf.maximum(0., m_plus - tf.norm(vs, axis=0))) # shape = [1,10]
-    second_max = tf.square(tf.maximum(0., tf.norm(vs, axis=0) - m_minus)) # shape = [1,10]
-    L = T*first_max + lambda_val*(tf.ones(tf.shape(T)) - T)*second_max
-    print(L)
+    # equal = tf.assert_equal(L0, L[0,0])
 
     return L
 
 def total_loss(margin_loss, reconstruction_loss):
-    pass
+    #shape margin_loss = [?,10]
+    total_margin_loss1 = tf.reduce_sum(margin_loss, axis=1)
+    print(total_margin_loss1)
+    total_margin_loss = tf.reduce_mean(total_margin_loss1)
+    return total_margin_loss
 
 
-test_input = tf.placeholder(dtype=tf.float32, shape=[None,28,28,1])
-inference_out = inference(test_input)
-# test_loss_vs = tf.ones([10, 16, 10]) / 2
-# y_onehot = tf.one_hot([1,2], 10)
-# loss = margin_loss(test_loss_vs, y_onehot)
+inputs1 = tf.placeholder(dtype=tf.float32, shape=[None,784])
+inputs = tf.reshape(inputs1, [tf.shape(inputs1)[0], 28, 28, 1])
+inference_out = inference(inputs)
+print("inf_out:\n", inference_out[0])
+capsule_probabilities = tf.norm(inference_out[0], axis=2)
+print("caps_probs:\n",capsule_probabilities)
+predictions = tf.argmax(capsule_probabilities, axis=1)
+
+labels_onehot = tf.placeholder(dtype=tf.float32, shape=[None,10])
+labels = tf.argmax(labels_onehot, axis=1)
+# test_loss_vs = tf.random_normal([3, 10, 16]) / 2
+# y_onehot = tf.one_hot([1,2,3], 10)
+margin_loss = margin_loss(inference_out[0], labels_onehot)
+norms = tf.norm(inference_out[0], axis=2)
+norms0 = norms[0]
+loss = total_loss(margin_loss, "")
+accuracy = tf.reduce_mean(tf.cast(tf.equal(labels, predictions), tf.float32))
+# accuracy = tf.metrics.accuracy(labels, predictions)
+
+opt = tf.train.AdamOptimizer().minimize(loss)
+
+mnist = input_data.read_data_sets("MNIST_data/", one_hot=True)
 
 def main():
     with tf.Session() as sess:
         sess.run((tf.global_variables_initializer(), tf.local_variables_initializer()))
-        # sess.run(tf.global_variables_initializer())
-        rand_array = np.random.rand(10, 28, 28, 1)
-        print(sess.run(inference_out, feed_dict={test_input: rand_array}))
-        print(sess.run(loss))
-
+        for i in range(10000):
+            batch_xs, batch_ys = mnist.train.next_batch(10)
+            # # sess.run(tf.global_variables_initializer())
+            # rand_array = np.random.rand(7, 28, 28, 1)
+            # print(sess.run(inference_out, feed_dict={test_input: rand_array}))
+            inf_out, preds, acc, marg_loss, loss_val, norm, _ = sess.run(
+                [inference_out,
+                predictions,
+                accuracy,
+                margin_loss,
+                loss,
+                norms,
+                opt],
+                feed_dict={inputs1: batch_xs, labels_onehot: batch_ys})
+            batch_ys_indexes = tf.argmax(batch_ys, axis=1)
+            # print(sess.run(tf.get_default_graph().get_tensor_by_name("routing1/capsule_layer_2/while/vector_output/squash/mul:0")))
+            print("margin loss:", marg_loss)
+            # print()
+            print("vs:", norm)
+            print()
+            print("Labels:", batch_ys_indexes.eval())
+            print("Preds:", preds)
+            print("Accuracy:", acc)
+            print("Loss:", loss_val)
 if __name__ == "__main__":
     main()
