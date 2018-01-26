@@ -49,7 +49,7 @@ def inference(images):
         # prediction_vec1 = capsule_weight_prod(split_caps_stack, weight_matrix, 32) # shape = [BATCH_SIZE,32,6,6,16,10]
 
     with tf.variable_scope("routing1") as scope:
-        vs = routing(prediction_vec1, 3, 2)
+        vs1 = routing(prediction_vec1, 3, 2)
 
     with tf.variable_scope("fc1") as scope:
         # vs1 = tf.expand_dims(vs, 0) # Will change later once algorithm optimized to batch size
@@ -74,19 +74,21 @@ def inference(images):
             activation_fn = tf.nn.sigmoid
         )
 
-    return vs, fc_final
+    return vs1, fc_final
 
 def routing(prediction_vectors, r0, l0):
     # shape prediction_vectors = [?,10,32,6,6,16]
     with tf.variable_scope("capsule_layer_%d" % l0) as scope:
         batch_size = tf.shape(prediction_vectors)[0]
         b011 = tf.placeholder(tf.float32, shape=[None,10,32,6,6,1])
-        b01 = tf.zeros_like(b011) #tf.zeros(shape=[batch_size,10,32,6,6,1])
-        b0 = tf.Variable(b01, name='b0', collections=[tf.GraphKeys.GLOBAL_VARIABLES])
+        b0 = tf.zeros_like(b011) #tf.zeros(shape=[batch_size,10,32,6,6,1])
+        # b0 = tf.Variable(b01, name='b0')
+        print(b0)
         c0 = tf.nn.softmax(b0)
         i0 = tf.constant(0)
         v01 = tf.placeholder(tf.float32, shape=[None,10,16])
         v0 = tf.zeros_like(v01) #tf.Variable(tf.zeros(shape=[batch_size, 10, 16]), name='v0')
+        print(v0)
 
         _, _, vs, _, _, _ = tf.while_loop(
             cond = lambda i, pred_vecs, v, b, c, r: condition(i, pred_vecs, v, b, c, r),
@@ -102,6 +104,7 @@ def condition(i, prediction_vectors, v, b, c, r):
 def body(i, prediction_vectors, v, b, c, r):
     # shape prediction_vectors = [BATCH_SIZE,10,32,6,6,16]
     # shape v = [BATCH_SIZE,10,16]
+    # shape b = [BATCH_SIZE,10,32,6,6,1]
     with tf.variable_scope("coupling"):
         c = tf.nn.softmax(b)
         print(c)
@@ -119,7 +122,8 @@ def body(i, prediction_vectors, v, b, c, r):
     with tf.variable_scope("agreement") as scope:
         elems = (prediction_vectors, v)
         agreement1 = nested_caps_dot(elems,1) # shape = [BATCH_SIZE,10,32,6,6]
-        tf.add(b, agreement1)
+        agreement1_expanded = tf.expand_dims(agreement1, 4)
+        tf.add(b, agreement1_expanded)
 
     return tf.add(i,1), prediction_vectors, v, b, c, r
 
@@ -167,10 +171,11 @@ def tensor_dot(tup):
     with tf.variable_scope("caps_dot") as scope:
         t1 = tup[0]
         t2 = tup[1]
-        end1 = tf.rank(t1)-1
-        end2 = tf.rank(t2)-1
-        axes = tf.expand_dims(tf.stack([end1, end2]), 1)
+        t1_rank = t1.get_shape().ndims
+        t2_rank = t2.get_shape().ndims
+        axes = [[t1_rank-1], [t2_rank-1]]
         out = tf.tensordot(t1, t2, axes)
+        print(out)
     return out
 
 def caps_dot(tup):
@@ -183,8 +188,8 @@ def nested_caps_dot(tup, i):
         return tf.map_fn(lambda x: nested_caps_dot(x, i-1), tup, dtype=tf.float32)
 
 def margin_loss(vs, T):
-    # shape v = [16, 10]
-    # shape T = [1, 10]
+    # shape vs = [?, 16, 10]
+    # shape T = [?, 10]
     # shape v_k = [16, 1]
     L = []
     m_plus = 0.9
@@ -201,16 +206,19 @@ def margin_loss(vs, T):
     first_max = tf.square(tf.maximum(0., m_plus - tf.norm(vs, axis=0))) # shape = [1,10]
     second_max = tf.square(tf.maximum(0., tf.norm(vs, axis=0) - m_minus)) # shape = [1,10]
     L = T*first_max + lambda_val*(tf.ones(tf.shape(T)) - T)*second_max
+    print(L)
 
     return L
 
+def total_loss(margin_loss, reconstruction_loss):
+    pass
 
 
 test_input = tf.placeholder(dtype=tf.float32, shape=[None,28,28,1])
 inference_out = inference(test_input)
-test_loss_vs = tf.ones([16, 10]) / 2
-y_onehot = tf.one_hot([1,2], 10)
-loss = margin_loss(test_loss_vs, y_onehot)
+# test_loss_vs = tf.ones([10, 16, 10]) / 2
+# y_onehot = tf.one_hot([1,2], 10)
+# loss = margin_loss(test_loss_vs, y_onehot)
 
 def main():
     with tf.Session() as sess:
